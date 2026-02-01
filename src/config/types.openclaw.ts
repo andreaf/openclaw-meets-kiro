@@ -95,6 +95,13 @@ export type OpenClawConfig = {
   canvasHost?: CanvasHostConfig;
   talk?: TalkConfig;
   gateway?: GatewayConfig;
+  /** Pi optimization configuration */
+  pi?: {
+    /** Enable Pi optimization integration */
+    enabled?: boolean;
+    /** Force enable Pi optimization even on non-Pi systems (for testing) */
+    forceEnable?: boolean;
+  };
 };
 
 export type ConfigValidationIssue = {

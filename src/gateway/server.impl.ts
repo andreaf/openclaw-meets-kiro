@@ -70,6 +70,43 @@ import {
   refreshGatewayHealthSnapshot,
 } from "./server/health-state.js";
 import { loadGatewayTlsRuntime } from "./server/tls.js";
+import { 
+  initializeGatewayPiIntegration, 
+  setupGatewayPiIntegration, 
+  stopGatewayPiIntegration,
+  handleGatewayShutdownPiIntegration,
+  getPiIntegrationHealth,
+  type GatewayPiIntegrationState 
+} from "./server-pi-integration.js";
+import {
+  initializeGatewayMessagingPiIntegration,
+  setupGatewayMessagingPiIntegration,
+  stopGatewayMessagingPiIntegration,
+  getPiMessagingIntegrationHealth,
+  type GatewayMessagingPiIntegrationState
+} from "./server-messaging-pi-integration.js";
+import {
+  initializeGatewayMediaPiIntegration,
+  setupGatewayMediaPiIntegration,
+  stopGatewayMediaPiIntegration,
+  getPiMediaIntegrationHealth,
+  type GatewayMediaPiIntegrationState
+} from "./server-media-pi-integration.js";
+import {
+  initializeGatewayAgentPiIntegration,
+  setupGatewayAgentPiIntegration,
+  stopGatewayAgentPiIntegration,
+  getPiAgentIntegrationHealth,
+  type GatewayAgentPiIntegrationState
+} from "./server-agent-pi-integration.js";
+import { createPiMetricsHandlers } from "./server-methods/pi-metrics.js";
+import { 
+  initializePiOptimization, 
+  shutdownPiOptimization, 
+  getPiOptimizationStatus,
+  isPiOptimizationActive,
+  isRunningOnPi 
+} from "../pi/index.js";
 
 export { __resetModelCatalogCacheForTest } from "./server-model-catalog.js";
 
@@ -421,7 +458,251 @@ export async function startGatewayServer(
     forwarder: execApprovalForwarder,
   });
 
+  // Initialize Pi optimization orchestration
+  let piOptimizationEnabled = false;
+  let piIntegrationState: GatewayPiIntegrationState;
+  let piMessagingIntegrationState: GatewayMessagingPiIntegrationState;
+  let piMediaIntegrationState: GatewayMediaPiIntegrationState;
+  let piAgentIntegrationState: GatewayAgentPiIntegrationState;
+  
+  try {
+    // Initialize main Pi orchestrator first
+    const piEnabled = cfgAtStart.pi?.enabled !== false; // Default to enabled unless explicitly disabled
+    const piForceEnable = cfgAtStart.pi?.forceEnable === true;
+    
+    if (piEnabled && (isRunningOnPi() || piForceEnable)) {
+      log.info('Initializing Pi optimization orchestration...', {
+        piDetected: isRunningOnPi(),
+        forceEnabled: piForceEnable,
+      });
+      
+      piOptimizationEnabled = await initializePiOptimization({
+        enabled: piEnabled,
+        autoDetect: true,
+        forceEnable: piForceEnable,
+        components: {
+          resourceMonitor: {
+            enabled: true,
+            interval: 5000, // 5 seconds
+            adaptiveScaling: true,
+          },
+          thermalController: {
+            enabled: true,
+            interval: 5, // 5 seconds
+            emergencyShutdown: true,
+          },
+          storageManager: {
+            enabled: true,
+            monitoringInterval: 60000, // 1 minute
+            autoOptimization: true,
+          },
+          gatewayIntegration: {
+            enabled: true,
+            broadcastMetrics: true,
+          },
+        },
+        eventHandling: {
+          logAllEvents: true,
+          maxEventHistory: 500,
+          eventPersistence: false,
+        },
+      });
+      
+      if (piOptimizationEnabled) {
+        log.info('Pi optimization orchestration initialized successfully', {
+          status: getPiOptimizationStatus(),
+        });
+      }
+    }
+    
+    // Initialize Gateway-specific Pi integration (for WebSocket handlers and dashboard)
+    piIntegrationState = await initializeGatewayPiIntegration({
+      enabled: piOptimizationEnabled,
+      autoDetect: true,
+      forceEnable: piForceEnable,
+    });
+    
+    if (piIntegrationState.enabled) {
+      log.info('Pi optimization integration enabled', {
+        piDetected: piIntegrationState.piDetected,
+        integrationActive: !!piIntegrationState.integration,
+      });
+
+      // Initialize Pi messaging integration if Pi integration is available
+      if (piIntegrationState.integration) {
+        const piConfig = piIntegrationState.integration.getPiConfiguration();
+        
+        piMessagingIntegrationState = await initializeGatewayMessagingPiIntegration(piConfig, {
+          enabled: true,
+          networkOptimization: {
+            enabled: true,
+            connectionPooling: true,
+            dataCompression: true,
+            qosEnabled: true,
+          },
+          offlineMessageHandling: {
+            enabled: true,
+            maxQueueSize: piConfig.memory.total <= 1024 ? 500 : 1000, // Smaller queue for low-memory Pi
+            persistToDisk: true,
+            retryIntervalMs: 30000,
+            maxRetries: 5,
+          },
+        });
+
+        if (piMessagingIntegrationState.enabled) {
+          log.info('Pi messaging integration enabled', {
+            piModel: piConfig.model,
+            memoryLimit: piConfig.memory.limit,
+          });
+        }
+
+        // Initialize Pi media integration if Pi integration is available
+        // We need to get the storage manager from the Pi integration
+        const storageManager = (piIntegrationState.integration as any).storageManager;
+        if (storageManager) {
+          piMediaIntegrationState = await initializeGatewayMediaPiIntegration(piConfig, storageManager, {
+            enabled: true,
+            memoryMappedFiles: {
+              enabled: true,
+              minFileSizeMB: 50,
+              maxMappedSizeMB: piConfig.memory.total <= 1024 ? 100 : 200,
+            },
+            externalStorage: {
+              enabled: true,
+              autoDetect: true,
+              preferredMountPoints: ['/media', '/mnt', '/usb'],
+              minFreeSpaceGB: 1,
+            },
+            processingOptimizations: {
+              enabled: true,
+              maxConcurrentProcessing: piConfig.memory.total <= 1024 ? 1 : 2,
+              useHardwareAcceleration: piConfig.model.includes('Pi 4') || piConfig.model.includes('Pi 5'),
+              compressionLevel: 6,
+            },
+          });
+
+          if (piMediaIntegrationState.enabled) {
+            log.info('Pi media integration enabled', {
+              piModel: piConfig.model,
+              memoryLimit: piConfig.memory.limit,
+            });
+          }
+        } else {
+          piMediaIntegrationState = {
+            enabled: false,
+            integration: null,
+          };
+        }
+
+        // Initialize Pi AI agent integration if Pi integration is available
+        const resourceMonitor = (piIntegrationState.integration as any).resourceMonitor;
+        const thermalController = (piIntegrationState.integration as any).thermalController;
+        
+        piAgentIntegrationState = await initializeGatewayAgentPiIntegration(
+          piConfig, 
+          resourceMonitor, 
+          thermalController, 
+          {
+            enabled: true,
+            resourceAwareScheduling: {
+              enabled: true,
+              maxConcurrentAgents: piConfig.memory.total <= 1024 ? 1 : 2,
+              memoryThresholdPercent: 80,
+              cpuThresholdPercent: 85,
+            },
+            thermalAwareProcessing: {
+              enabled: true,
+              temperatureThresholds: {
+                reduceAgents: 70,
+                pauseAgents: 80,
+              },
+              cooldownPeriodMs: 60000,
+            },
+            modelOptimizations: {
+              enabled: true,
+              preferLightweightModels: piConfig.memory.total <= 1024,
+              reduceContextWindow: true,
+              batchRequests: true,
+            },
+          }
+        );
+
+        if (piAgentIntegrationState.enabled) {
+          log.info('Pi AI agent integration enabled', {
+            piModel: piConfig.model,
+            memoryLimit: piConfig.memory.limit,
+          });
+        }
+      } else {
+        piMessagingIntegrationState = {
+          enabled: false,
+          integration: null,
+        };
+        piMediaIntegrationState = {
+          enabled: false,
+          integration: null,
+        };
+        piAgentIntegrationState = {
+          enabled: false,
+          integration: null,
+        };
+      }
+    } else {
+      piMessagingIntegrationState = {
+        enabled: false,
+        integration: null,
+      };
+      piMediaIntegrationState = {
+        enabled: false,
+        integration: null,
+      };
+      piAgentIntegrationState = {
+        enabled: false,
+        integration: null,
+      };
+    }
+  } catch (error) {
+    log.error('Failed to initialize Pi integrations:', { error: error instanceof Error ? error.message : String(error) });
+    piIntegrationState = {
+      enabled: false,
+      piDetected: false,
+      integration: null,
+    };
+    piMessagingIntegrationState = {
+      enabled: false,
+      integration: null,
+    };
+    piMediaIntegrationState = {
+      enabled: false,
+      integration: null,
+    };
+    piAgentIntegrationState = {
+      enabled: false,
+      integration: null,
+    };
+  }
+
   const canvasHostServerPort = (canvasHostServer as CanvasHostServer | null)?.port;
+
+  // Get Pi handlers if integration is available
+  const piHandlers = piIntegrationState.integration 
+    ? createPiMetricsHandlers(piIntegrationState.integration)
+    : {};
+
+  // Get Pi messaging handlers if integration is available
+  const piMessagingHandlers = piMessagingIntegrationState.integration
+    ? {} // Handlers are registered during setup
+    : {};
+
+  // Get Pi media handlers if integration is available
+  const piMediaHandlers = piMediaIntegrationState.integration
+    ? {} // Handlers are registered during setup
+    : {};
+
+  // Get Pi AI agent handlers if integration is available
+  const piAgentHandlers = piAgentIntegrationState.integration
+    ? {} // Handlers are registered during setup
+    : {};
 
   attachGatewayWsHandlers({
     wss,
@@ -439,6 +720,10 @@ export async function startGatewayServer(
     extraHandlers: {
       ...pluginRegistry.gatewayHandlers,
       ...execApprovalHandlers,
+      ...piHandlers,
+      ...piMessagingHandlers,
+      ...piMediaHandlers,
+      ...piAgentHandlers,
     },
     broadcast,
     context: {
@@ -479,6 +764,88 @@ export async function startGatewayServer(
       broadcastVoiceWakeChanged,
     },
   });
+
+  // Setup Pi optimization integration with Gateway
+  if (piIntegrationState.enabled && piIntegrationState.integration) {
+    try {
+      setupGatewayPiIntegration(
+        piIntegrationState,
+        broadcast,
+        (handlers) => {
+          // Pi handlers are already included in the WebSocket setup above
+          // This is called during the setup process to register handlers
+          log.debug('Pi integration handlers registered', {
+            handlerCount: Object.keys(handlers).length,
+          });
+        }
+      );
+      
+      log.info('Pi optimization integration setup completed');
+    } catch (error) {
+      log.error('Failed to setup Pi integration with Gateway:', { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  // Setup Pi messaging integration with Gateway
+  if (piMessagingIntegrationState.enabled && piMessagingIntegrationState.integration) {
+    try {
+      setupGatewayMessagingPiIntegration(
+        piMessagingIntegrationState,
+        broadcast,
+        (handlers) => {
+          // Pi messaging handlers are registered during setup
+          log.debug('Pi messaging integration handlers registered', {
+            handlerCount: Object.keys(handlers).length,
+          });
+        }
+      );
+      
+      log.info('Pi messaging integration setup completed');
+    } catch (error) {
+      log.error('Failed to setup Pi messaging integration with Gateway:', { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  // Setup Pi media integration with Gateway
+  if (piMediaIntegrationState.enabled && piMediaIntegrationState.integration) {
+    try {
+      setupGatewayMediaPiIntegration(
+        piMediaIntegrationState,
+        broadcast,
+        (handlers) => {
+          // Pi media handlers are registered during setup
+          log.debug('Pi media integration handlers registered', {
+            handlerCount: Object.keys(handlers).length,
+          });
+        }
+      );
+      
+      log.info('Pi media integration setup completed');
+    } catch (error) {
+      log.error('Failed to setup Pi media integration with Gateway:', { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  // Setup Pi AI agent integration with Gateway
+  if (piAgentIntegrationState.enabled && piAgentIntegrationState.integration) {
+    try {
+      setupGatewayAgentPiIntegration(
+        piAgentIntegrationState,
+        broadcast,
+        (handlers) => {
+          // Pi AI agent handlers are registered during setup
+          log.debug('Pi AI agent integration handlers registered', {
+            handlerCount: Object.keys(handlers).length,
+          });
+        }
+      );
+      
+      log.info('Pi AI agent integration setup completed');
+    } catch (error) {
+      log.error('Failed to setup Pi AI agent integration with Gateway:', { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
   logGatewayStartup({
     cfg: cfgAtStart,
     bindHost,
@@ -572,6 +939,28 @@ export async function startGatewayServer(
     wss,
     httpServer,
     httpServers,
+    // Pi integration cleanup
+    piIntegrationCleanup: async () => {
+      // Shutdown main Pi orchestrator first
+      if (piOptimizationEnabled) {
+        log.info('Shutting down Pi optimization orchestration...');
+        await shutdownPiOptimization();
+      }
+      
+      // Then shutdown Gateway-specific Pi integrations
+      if (piIntegrationState.enabled) {
+        await handleGatewayShutdownPiIntegration(piIntegrationState);
+      }
+      if (piMessagingIntegrationState.enabled) {
+        await stopGatewayMessagingPiIntegration(piMessagingIntegrationState);
+      }
+      if (piMediaIntegrationState.enabled) {
+        await stopGatewayMediaPiIntegration(piMediaIntegrationState);
+      }
+      if (piAgentIntegrationState.enabled) {
+        await stopGatewayAgentPiIntegration(piAgentIntegrationState);
+      }
+    },
   });
 
   return {

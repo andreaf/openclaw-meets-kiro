@@ -29,6 +29,7 @@ export function createGatewayCloseHandler(params: {
   wss: WebSocketServer;
   httpServer: HttpServer;
   httpServers?: HttpServer[];
+  piIntegrationCleanup?: () => Promise<void>;
 }) {
   return async (opts?: { reason?: string; restartExpectedMs?: number | null }) => {
     const reasonRaw = typeof opts?.reason === "string" ? opts.reason.trim() : "";
@@ -67,6 +68,16 @@ export function createGatewayCloseHandler(params: {
     if (params.pluginServices) {
       await params.pluginServices.stop().catch(() => {});
     }
+    
+    // Pi integration cleanup
+    if (params.piIntegrationCleanup) {
+      try {
+        await params.piIntegrationCleanup();
+      } catch {
+        /* ignore */
+      }
+    }
+    
     await stopGmailWatcher();
     params.cron.stop();
     params.heartbeatRunner.stop();
