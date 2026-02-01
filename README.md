@@ -1,4 +1,4 @@
-# 🦞 OpenClaw — Personal AI Assistant
+# 🦞 OpenClaw — Personal AI Assistant - Meets Kiro 
 
 <p align="center">
     <picture>
